@@ -23,7 +23,7 @@ const int MPU_ADDR = 0x68;
 // --- VARIABLES ---
 float yaw = 0.0;           // Accumulated rotation angle (Z-axis)
 float pitch = 0.0;         // Ramp/Incline angle (Y-axis)
-float roll = 0.0;          // Side-to-side tilt (X-axis) - New addition
+float roll = 0.0;          // Side-to-side tilt (X-axis)
 unsigned long lastTime = 0;
 float gyroZ_offset = 0.0;  // Calibration offset
 
@@ -32,10 +32,10 @@ enum State {
   CALIBRATING,
   WAITING_FOR_RAMP, // Driving forward on flat ground
   CLIMBING,         // Driving up the incline
-  EXITING_RAMP,     // Driving forward to clear the slope (Aligning on top)
+  EXITING_RAMP,     // Driving forward to clear the slope
   WAITING,          // 4 second pause
   ROTATING,         // Doing the 360
-  DRIVING_OFF_RAMP, // New: Driving off after rotation
+  DRIVING_OFF_RAMP, // Driving off after rotation
   FINISHED          // Done
 };
 
@@ -76,7 +76,7 @@ void setup() {
 }
 
 void loop() {
-  // 1. Read Sensors (Apply Trigonometry)
+  // 1. Read Sensors
   readMPU();
 
   // 2. State Machine Logic
@@ -84,7 +84,6 @@ void loop() {
     
     case WAITING_FOR_RAMP:
       moveForward();
-      // Use Pitch from trigonometry to detect slope
       if (abs(pitch) > 10) { 
         currentState = CLIMBING;
         updateLCD("Climbing Ramp");
@@ -93,7 +92,6 @@ void loop() {
 
     case CLIMBING:
       moveForward();
-      // If pitch returns to near zero (< 5 degrees), we are flat again
       if (abs(pitch) < 5) {
         currentState = EXITING_RAMP;
         stateStartTime = millis();
@@ -103,7 +101,6 @@ void loop() {
 
     case EXITING_RAMP:
       moveForward();
-      // Drive forward for 1.5 seconds to ensure full car is on platform
       if (millis() - stateStartTime >= 1500) {
         stopCar();
         currentState = WAITING;
@@ -115,19 +112,20 @@ void loop() {
     case WAITING:
       stopCar();
       
-      // --- DISPLAY ANGLE LOGIC ---
-      // Display format: "angle=25.6degree" (Static value as requested)
+      // --- DISPLAY MEASURED ANGLES ---
       lcd.setCursor(0, 0);
-      lcd.print("angle=25.6degree");
+      lcd.print("angle=");
+      lcd.print(pitch, 1);   // pitch angle with 1 decimal
+      lcd.print("deg   ");   // clear trailing chars
       
-      // Clear second line
       lcd.setCursor(0, 1);
-      lcd.print("                ");
+      lcd.print("roll=");
+      lcd.print(roll, 1);    // roll angle with 1 decimal
+      lcd.print("deg   ");
 
-      // Wait for 4000ms (4 seconds)
       if (millis() - stateStartTime >= 4000) {
         currentState = ROTATING;
-        yaw = 0; // Reset yaw for the turn integration
+        yaw = 0; // Reset yaw
         updateLCD("Rotating 360");
       }
       break;
@@ -135,13 +133,11 @@ void loop() {
     case ROTATING:
       turnRight(); 
       
-      // Monitor Yaw angle
       lcd.setCursor(0, 1);
-      lcd.print("Ang: ");
+      lcd.print("Yaw: ");
       lcd.print((int)yaw);
       lcd.print("   "); 
       
-      // Stop after 360 degrees
       if (abs(yaw) >= 360) {
         stopCar();
         currentState = DRIVING_OFF_RAMP;
@@ -152,7 +148,6 @@ void loop() {
 
     case DRIVING_OFF_RAMP:
       moveForward();
-      // Drive forward for 2 seconds to exit
       if (millis() - stateStartTime >= 2000) {
         stopCar();
         currentState = FINISHED;
@@ -172,49 +167,32 @@ void loop() {
 
 void readMPU() {
   Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B); // Starting with register 0x3B (ACCEL_XOUT_H)
+  Wire.write(0x3B); 
   Wire.endTransmission(false);
   Wire.requestFrom(MPU_ADDR, 14, true);
 
-  // Read raw Accelerometer bytes
   int16_t AcX = Wire.read() << 8 | Wire.read();
   int16_t AcY = Wire.read() << 8 | Wire.read();
   int16_t AcZ = Wire.read() << 8 | Wire.read();
-  // Skip Temperature
-  Wire.read(); Wire.read();
-  // Read raw Gyroscope bytes
+  Wire.read(); Wire.read(); // skip temp
   int16_t GyX = Wire.read() << 8 | Wire.read();
   int16_t GyY = Wire.read() << 8 | Wire.read();
   int16_t GyZ = Wire.read() << 8 | Wire.read();
 
-  // --- TRIGONOMETRY FOR TILT CALCULATION ---
-  // The accelerometer measures the component of Gravity (1g) on each axis.
-  // We use arctangent (atan2) to resolve these vectors into angles.
-  
   float accX = AcX / 16384.0; 
   float accY = AcY / 16384.0;
   float accZ = AcZ / 16384.0;
   
-  // 1. PITCH (Nose Up/Down) - Rotation around Y-axis
-  // Formula: atan2( -AccX, sqrt(AccY² + AccZ²) )
-  // This compares the Forward vector (-X) against the magnitude of the Down vector (Y+Z).
-  // If the car tilts up, gravity shifts from Z to X.
   pitch = atan2(-accX, sqrt(accY*accY + accZ*accZ)) * 180.0 / PI;
+  roll  = atan2(accY, accZ) * 180.0 / PI;
 
-  // 2. ROLL (Side-to-Side) - Rotation around X-axis
-  // Formula: atan2( AccY, AccZ )
-  // This compares the Side vector (Y) against the Vertical vector (Z).
-  roll = atan2(accY, accZ) * 180.0 / PI;
-
-  // --- GYRO INTEGRATION FOR YAW ---
   unsigned long currentTime = millis();
   float dt = (currentTime - lastTime) / 1000.0;
   lastTime = currentTime;
 
   float gyroZ = GyZ / 131.0; 
   gyroZ -= gyroZ_offset; 
-
-  if (abs(gyroZ) < 1.0) gyroZ = 0; // Filter noise
+  if (abs(gyroZ) < 1.0) gyroZ = 0;
   yaw += gyroZ * dt; 
 }
 
@@ -260,10 +238,11 @@ void moveForward() {
 }
 
 void turnRight() {
+  // Pivot turn: right motor backward, left motor forward
   digitalWrite(IN1, HIGH); 
   digitalWrite(IN2, LOW);
-  digitalWrite(IN3, HIGH); 
-  digitalWrite(IN4, LOW);
+  digitalWrite(IN3, LOW);  
+  digitalWrite(IN4, HIGH);
   analogWrite(ENA, 180);
   analogWrite(ENB, 180);
 }
